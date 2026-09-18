@@ -20,13 +20,21 @@
 
 ## 纯前端与部署
 
-本项目仅包含 HTML、CSS、JavaScript 和 GLSL 着色器。全部动画与纹理生成在访问者浏览器内运行，无服务器进程、数据库、API、密钥、环境变量或外部运行时依赖。`dist/` 中的四个文件同时也是完整源码，无需编译或安装依赖。
+本项目包含 HTML、CSS、JavaScript、GLSL 着色器，以及随站点一起托管的原创 MP3 配乐。全部动画与纹理生成在访问者浏览器内运行，无服务器进程、数据库、API、密钥、环境变量或外部运行时依赖。`dist/` 包含可直接部署的完整源码与资源，无需编译或安装依赖。
+
+### 原创配乐《星海未眠》
+
+为星云与镜湖场景创作的器乐配乐，以轻柔钢琴、温暖铺底和稀疏铃音构成旋律与和声。音频随页面托管，不依赖音乐平台、第三方链接或在线生成服务。
+
+页面默认尝试以较低音量循环播放。浏览器允许有声自动播放时直接开始；如果浏览器拦截，首次点击、拖动结束或按键后开始，并显示“轻触聆听”的提示。网页无法强制绕过浏览器的自动播放策略。右上角的音乐按钮可开关配乐，并在本设备记住选择；沉浸模式下左下角保留音乐按钮。切换到后台时暂停，回来后按原来的开关状态恢复。音乐开关独立于场景动画暂停。
+
+音乐为原创旋律和程序合成音色，无采样歌曲或外部录音。可选的离线作曲脚本位于 `tools/compose_soundtrack.py`，仅用于重新生成音频，不参与站点运行。相关说明见 `music/README.md`。
 
 ### EdgeOne Pages
 
 导入 GitHub 仓库时，将仓库根目录作为项目根目录；选择普通静态站点对应的框架预设（Other / 其他），发布目录设为 `dist`。本仓库的 `edgeone.json` 已指定 `outputDirectory: "./dist"`。不需要 npm 安装或构建步骤。
 
-也可以直接上传 `dist/` 目录中的全部内容；上传后的站点根目录应直接包含 `index.html`、`scene.js`、`nebula-cache.js` 和 `style.css`，不要让访问路径多一层 `dist/`。更新已有站点时也要一并上传新增的 `nebula-cache.js`，因为 `scene.js` 会通过 ES 模块导入它。
+也可以直接上传 `dist/` 目录中的全部内容；上传后的站点根目录应直接包含 `index.html`、`scene.js`、`nebula-cache.js`、`music.js`、`style.css` 和 `audio/` 文件夹，不要让访问路径多一层 `dist/`。更新已有站点时也要一并上传 `nebula-cache.js` 和音频资源，保留完整目录结构。
 
 官方配置说明：https://pages.edgeone.ai/document/edgeone-json
 
@@ -48,6 +56,9 @@ python -m http.server 8080 --directory dist
 | `dist/style.css` | 全屏布局和响应式样式 |
 | `dist/scene.js` | WebGL 场景、着色器、星云、流星、镜湖和交互逻辑 |
 | `dist/nebula-cache.js` | 星云立方体纹理生成、局部高倍补绘、纹理格式与尺寸回退 |
+| `dist/music.js` | 自动播放尝试、交互解锁、音乐开关与后台暂停 |
+| `dist/audio/starsea-awake.mp3` | 原创循环配乐《星海未眠》 |
+| `tools/compose_soundtrack.py` | 可选的离线作曲与音频生成脚本 |
 | `edgeone.json` | EdgeOne 静态发布目录配置 |
 
 最新行为：星云使用本地生成的纹理缓存与流场动画，高倍观察按需补绘局部细节；保留实时星点、流星、镜湖反射、360° 旋转和 0.75–16 倍缩放。
