@@ -1,4 +1,4 @@
-// Original soundtrack: 星海未眠. Independent of the scene render loop.
+// Original soundtrack: 星落成诗. Independent of the scene render loop.
 const audio = document.querySelector('#background-music');
 const buttons = [...document.querySelectorAll('[data-music-toggle]')];
 const status = document.querySelector('#music-status');
@@ -16,8 +16,8 @@ function render() {
   const playing = enabled && !audio.paused && !document.hidden;
   const state = !enabled ? 'muted' : failed ? 'error' : playing ? 'playing' : pending ? 'loading' : 'waiting';
   const label = playing || (enabled && pending)
-    ? '关闭配乐《星海未眠》'
-    : failed ? '重新播放配乐《星海未眠》' : '播放配乐《星海未眠》';
+    ? '关闭配乐《星落成诗》'
+    : failed ? '重新播放配乐《星落成诗》' : '播放配乐《星落成诗》';
   for (const button of buttons) {
     button.dataset.state = state;
     button.setAttribute('aria-label', label);
@@ -25,7 +25,7 @@ function render() {
     button.title = label;
   }
   status.hidden = !enabled || playing || document.hidden || (!awaitingGesture && !failed);
-  status.textContent = failed ? '音乐暂未响起 · 轻触音乐按钮重试' : '轻触聆听 · 星海未眠';
+  status.textContent = failed ? '音乐暂未响起 · 轻触音乐按钮重试' : '轻触聆听 · 星落成诗';
 }
 
 function remember() {

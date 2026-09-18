@@ -1,315 +1,338 @@
 #!/usr/bin/env python3
-"""星海未眠 / Starsea, Still Awake — an original miniature by Codex.
+"""星落成诗 / When Starlight Finds the Water — original score, September 2026.
 
-Reproducible, sample-free instrumental: 32 bars, D major, 4/4, 68 BPM.
-Requires Python 3, numpy, scipy, and ffmpeg. Outputs are saved in music/generated/.
+64 bars in E-flat major, 6/8, expressive dotted-quarter tempo around 52 BPM.
+Recorded grand piano, viola/cello ensembles and harp; no pre-existing song.
+Requires Python 3, numpy, scipy, ffmpeg. All rendering is offline; the website
+only plays the resulting MP3. Sample credits: dist/audio/CREDITS.txt.
 Run: python tools/compose_soundtrack.py
 """
+from functools import lru_cache
+from fractions import Fraction
 from pathlib import Path
+import hashlib
 import json
 import math
 import subprocess
+import urllib.request
 import numpy as np
 from scipy import signal
 from scipy.io import wavfile
 
-HERE = Path(__file__).resolve().parents[1] / "music" / "generated"
-HERE.mkdir(parents=True, exist_ok=True)
+ROOT = Path(__file__).resolve().parents[1]
+OUT = ROOT / 'music/generated'
 SR = 44100
-BPM = 68
-BEAT = 60.0 / BPM
-BAR = 4 * BEAT
-LEAD = 0.35
-DURATION = LEAD + 32 * BAR + 4.2
+TITLE = '星落成诗'
+STEM = 'starlight-on-water'
+RNG = np.random.default_rng(9182026)
+SAMPLES = json.loads((ROOT / 'music/samples.json').read_text())
+
+
+def midi(note):
+    accidental = 1 if '#' in note else -1 if 'b' in note else 0
+    return 12 * (int(note[-1]) + 1) + {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}[note[0]] + accidental
+
+
+# Bass, five left-hand pitches, and close inner voices for the string section.
+CHORDS = {
+    'Eb': ('Eb2', ['Bb2', 'Eb3', 'G3', 'Bb3', 'F4'], ['G3', 'Bb3', 'D4']),
+    'BbD': ('D2', ['Bb2', 'F3', 'Bb3', 'D4', 'F4'], ['F3', 'Bb3', 'D4']),
+    'Cm': ('C2', ['G2', 'C3', 'Eb3', 'G3', 'D4'], ['G3', 'Bb3', 'Eb4']),
+    'Ab': ('Ab2', ['Eb3', 'Ab3', 'C4', 'Eb4', 'G4'], ['Ab3', 'C4', 'Eb4']),
+    'Fm': ('F2', ['C3', 'F3', 'Ab3', 'C4', 'Eb4'], ['Ab3', 'C4', 'Eb4']),
+    'EbG': ('G2', ['Bb2', 'Eb3', 'G3', 'Bb3', 'D4'], ['G3', 'Bb3', 'Eb4']),
+    'Bb': ('Bb1', ['F3', 'Bb3', 'D4', 'F4', 'C5'], ['F3', 'Bb3', 'D4']),
+    'Bbs': ('Bb1', ['F3', 'Bb3', 'Eb4', 'F4', 'C5'], ['F3', 'Bb3', 'Eb4']),
+    'Gm': ('G2', ['D3', 'G3', 'Bb3', 'D4', 'F4'], ['G3', 'Bb3', 'D4']),
+    'G7': ('G2', ['D3', 'G3', 'B3', 'D4', 'F4'], ['G3', 'B3', 'F4']),
+    'Abm': ('Ab2', ['Eb3', 'Ab3', 'B3', 'Eb4', 'Gb4'], ['Ab3', 'B3', 'Eb4']),
+    'Eb6': ('Eb2', ['Bb2', 'Eb3', 'G3', 'Bb3', 'C4'], ['G3', 'Bb3', 'C4']),
+}
+A_CHORDS = ['Eb', 'BbD', 'Cm', 'Ab', 'Fm', 'EbG', 'Ab', 'Bb'] * 2
+BRIDGE_CHORDS = ['Cm', 'Gm', 'Ab', 'EbG', 'Fm', 'Abm', 'Bbs', 'Bb']
+B_CHORDS = ['Ab', 'EbG', 'Fm', 'Bb', 'Gm', 'Cm', 'Fm', 'Bb',
+            'Ab', 'Bb', 'Cm', 'Gm', 'Fm', 'EbG', 'Ab', 'Bb']
+PROGRESSION = ['Eb', 'BbD', 'Cm', 'Ab'] + A_CHORDS + BRIDGE_CHORDS + B_CHORDS + A_CHORDS + ['Fm', 'Bb', 'Eb6', 'Eb6']
+
+# Each tuple is (eighth-note offset, pitch, length in eighth notes).
+# The central motif G–Bb–Eb rises, then D–C–Bb answers it in the next bar.
+THEME = [
+    [(0, 'G4', 1), (1, 'Bb4', 2), (3, 'Eb5', 2.7)],
+    [(0, 'D5', 3), (3, 'C5', 1), (4, 'Bb4', 1.8)],
+    [(0, 'G4', 1), (1, 'C5', 2), (3, 'Eb5', 2), (5, 'D5', .8)],
+    [(0, 'C5', 3), (3, 'Bb4', 1), (4, 'Ab4', 1.6)],
+    [(0, 'Ab4', 1), (1, 'C5', 1), (2, 'F5', 2), (4, 'Eb5', 1.7)],
+    [(0, 'D5', 1), (1, 'Eb5', 2), (3, 'Bb4', 2.5)],
+    [(0, 'C5', 2), (2, 'Bb4', 1), (3, 'G4', 1), (4, 'Ab4', 1.7)],
+    [(0, 'F4', 3.5), (4.5, 'G4', .5), (5, 'Ab4', .75)],
+    [(0, 'G4', 1), (1, 'Bb4', 2), (3, 'Eb5', 2), (5, 'F5', .8)],
+    [(0, 'D5', 2), (2, 'C5', 1), (3, 'Bb4', 2.7)],
+    [(0, 'G4', 1), (1, 'C5', 2), (3, 'Eb5', 1), (4, 'G5', 1.7)],
+    [(0, 'F5', 2), (2, 'Eb5', 1), (3, 'C5', 2.4)],
+    [(0, 'Ab4', 1), (1, 'C5', 2), (3, 'Eb5', 1), (4, 'F5', 1.7)],
+    [(0, 'Eb5', 2), (2, 'D5', 1), (3, 'Bb4', 2.4)],
+    [(0, 'C5', 2), (2, 'Bb4', 1), (3, 'Ab4', 1), (4, 'G4', 1.6)],
+    [(0, 'F4', 4.4)],
+]
+BRIDGE = [
+    [(1, 'Eb5', 4)], [(0, 'D5', 3), (4, 'Bb4', 1.7)],
+    [(1, 'C5', 4)], [(0, 'Bb4', 3.2)],
+    [(0, 'Ab4', 2), (3, 'C5', 2.5)],
+    [(0, 'B4', 3), (3, 'Ab4', 2)],
+    [(0, 'Bb4', 3), (3, 'C5', 2.5)],
+    [(0, 'D5', 3), (4, 'Eb5', 1), (5, 'F5', .8)],
+]
+CHORUS = [
+    [(0, 'Eb5', 1), (1, 'G5', 2), (3, 'Ab5', 2.7)],
+    [(0, 'G5', 3), (3, 'F5', 1), (4, 'Eb5', 1.8)],
+    [(0, 'F5', 2), (2, 'Eb5', 1), (3, 'C5', 2.8)],
+    [(0, 'D5', 3), (3, 'F5', 2.6)],
+    [(0, 'G5', 3), (3, 'F5', 1), (4, 'D5', 1.8)],
+    [(0, 'Eb5', 2), (2, 'G5', 1), (3, 'C6', 2.7)],
+    [(0, 'Bb5', 2), (2, 'Ab5', 1), (3, 'G5', 1), (4, 'F5', 1.7)],
+    [(0, 'F5', 4.6)],
+    [(0, 'Eb5', 1), (1, 'G5', 2), (3, 'Ab5', 2), (5, 'Bb5', .8)],
+    [(0, 'F5', 3), (3, 'D5', 2.7)],
+    [(0, 'Eb5', 1), (1, 'G5', 2), (3, 'C6', 2), (5, 'Bb5', .8)],
+    [(0, 'A5', 1), (1, 'G5', 2), (3, 'F5', 1), (4, 'D5', 1.7)],
+    [(0, 'C5', 1), (1, 'Eb5', 2), (3, 'F5', 2.7)],
+    [(0, 'Eb5', 2), (2, 'D5', 1), (3, 'Bb4', 2.6)],
+    [(0, 'C5', 2), (2, 'Bb4', 1), (3, 'Ab4', 1), (4, 'G4', 1.7)],
+    [(0, 'F4', 4.4), (5, 'D4', .7)],
+]
+INTRO = [[(3, 'Bb4', 2)], [], [(3, 'G4', 2)], [(3, 'Ab4', 2)]]
+CODA = [[(0, 'Ab4', 2), (3, 'C5', 2.5)], [(0, 'Bb4', 2), (3, 'F4', 2.5)],
+        [(0, 'G4', 2), (2, 'F4', 1), (3, 'Eb4', 2.8)], [(0, 'Eb4', 10)]]
+RETURN = [list(bar) for bar in THEME]
+RETURN[15] = [(0, 'F4', 3), (3, 'G4', 2.4)]
+MELODY = INTRO + THEME + BRIDGE + CHORUS + RETURN + CODA
+assert len(PROGRESSION) == len(MELODY) == 64
+
+# Phrase-level rubato, shared by every instrument. No independent metronomes.
+TEMPI = []
+for bar in range(64):
+    bpm = 48 if bar < 4 else 52 if bar < 20 else 49 if bar < 28 else 54 if bar < 44 else 51 if bar < 60 else [48, 46, 43, 41][bar - 60]
+    if bar in [11, 19, 27, 35, 43, 51, 59]:
+        bpm *= .955
+    TEMPI.append(bpm)
+BAR_LENGTHS = [120 / t for t in TEMPI]
+STARTS = np.concatenate([[.14], .14 + np.cumsum(BAR_LENGTHS)])
+DURATION = float(STARTS[-1] + 7.2)
 N = math.ceil(DURATION * SR)
-RNG = np.random.default_rng(20260918)
 
 
-def midi(name):
-    names = {"C": 0, "C#": 1, "D": 2, "D#": 3, "E": 4, "F": 5,
-             "F#": 6, "G": 7, "G#": 8, "A": 9, "A#": 10, "B": 11}
-    return 12 * (int(name[-1]) + 1) + names[name[:-1]]
+def sample_path(item):
+    path = OUT / 'samples' / item['file']
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        print('Downloading', item['file'], flush=True)
+        request = urllib.request.Request(item['url'], headers={'User-Agent': 'Starsea-offline-composer/2'})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            data = response.read()
+        verify_sample(item, data)
+        path.write_bytes(data)
+    return path
 
 
-def hz(name):
-    return 440.0 * 2 ** ((midi(name) - 69) / 12)
+def verify_sample(item, data):
+    actual = hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest()
+    if actual != item['git_blob_sha1']:
+        raise ValueError('Sample checksum mismatch: ' + item['file'])
 
 
-def insert(bus, sound, when, gain=1., pan=0.):
-    start = round(when * SR)
-    if start < 0:
-        sound = sound[-start:]
-        start = 0
-    size = min(len(sound), len(bus) - start)
+@lru_cache(maxsize=96)
+def load_sample(index):
+    item = SAMPLES[index]
+    path = sample_path(item)
+    verify_sample(item, path.read_bytes())
+    raw = subprocess.run(['ffmpeg', '-v', 'error', '-i', str(path), '-t', '13',
+                          '-ar', str(SR), '-ac', '2', '-f', 'f32le', '-'],
+                         capture_output=True, check=True).stdout
+    x = np.frombuffer(raw, dtype='<f4').reshape(-1, 2).copy()
+    # Trim only leading near-silence, keeping the recorded attack intact.
+    envelope = np.max(np.abs(x), axis=1)
+    active = np.flatnonzero(envelope > max(float(envelope.max()) * .015, .000015))
+    if len(active):
+        x = x[max(0, int(active[0]) - int(.004 * SR)):]
+    x = signal.sosfilt(signal.butter(2, 36, 'highpass', fs=SR, output='sos'), x, axis=0).astype(np.float32)
+    if item['instrument'] in ('viola', 'cello'):
+        rms = np.sqrt(np.mean(x[int(.25 * SR):int(2.0 * SR)] ** 2))
+        x *= .09 / max(rms, .001)
+    elif item['instrument'] == 'harp':
+        x *= .22 / max(float(np.max(np.abs(x))), .01)
+    else:
+        # Modest correction of uneven recorded key levels; preserve the dynamics.
+        peak = np.percentile(np.abs(x[:int(.8 * SR)]), 99.7)
+        target = .19 if item['layer'] == 4 else .26
+        x *= np.clip(target / max(peak, .01), .6, 2.8)
+    return x
+
+
+@lru_cache(maxsize=160)
+def pitched(instrument, pitch, layer):
+    choices = [(i, s) for i, s in enumerate(SAMPLES)
+               if s['instrument'] == instrument and s['layer'] == layer]
+    index, item = min(choices, key=lambda pair: abs(pair[1]['midi'] - pitch))
+    rate = 2 ** ((pitch - item['midi'] + item['tune_cents'] / 100) / 12)
+    ratio = Fraction(1 / rate).limit_denominator(800)
+    x = signal.resample_poly(load_sample(index), ratio.numerator, ratio.denominator, axis=0)
+    cutoff = 7400 if instrument == 'piano' else 4100 if instrument in ('viola', 'cello') else 9000
+    return signal.sosfilt(signal.butter(2, cutoff, fs=SR, output='sos'), x, axis=0).astype(np.float32)
+
+
+EVENTS = []
+
+
+def place(bus, instrument, note, when, hold, velocity, gain, pan=0):
+    pitch = midi(note) if isinstance(note, str) else note
+    layer = (8 if velocity >= .67 else 4) if instrument == 'piano' else 1
+    x = pitched(instrument, pitch, layer)
+    bowed = instrument in ('viola', 'cello')
+    release = 1.0 if bowed else 1.35 if instrument == 'piano' else 2.6
+    size = min(len(x), round((hold + release) * SR))
+    t = np.arange(size, dtype=np.float32) / SR
+    env = np.ones(size, np.float32)
+    if bowed:
+        env *= np.sin(np.minimum(t / .65, 1) * np.pi / 2) ** 2
+        env *= .86 + .14 * np.sin(np.minimum(t / max(hold, .1), 1) * np.pi)
+        env *= np.cos(np.clip((t - hold) / release, 0, 1) * np.pi / 2) ** 2
+    else:
+        env *= np.minimum(t / .003, 1)
+        env *= np.exp(-np.maximum(t - hold, 0) * (5.5 / release))
+        env *= np.clip((hold + release - t) / .045, 0, 1)
+    start = max(0, round(when * SR))
+    size = min(size, len(bus) - start)
     if size <= 0:
         return
-    if sound.ndim == 1:
-        angle = (np.clip(pan, -1, 1) + 1) * np.pi / 4
-        bus[start:start + size, 0] += sound[:size] * (gain * np.cos(angle))
-        bus[start:start + size, 1] += sound[:size] * (gain * np.sin(angle))
-    else:
-        bus[start:start + size] += sound[:size] * gain
+    # Retain the recording's stereo image; make placement subtle, not hard-panned.
+    balance = np.array([1 - max(pan, 0) * .42, 1 + min(pan, 0) * .42], np.float32)
+    bus[start:start + size] += x[:size] * env[:size, None] * balance * gain * velocity ** 1.2
+    EVENTS.append({'instrument': instrument, 'midi': pitch, 'start': round(when, 5),
+                   'hold': round(hold, 5), 'velocity': round(velocity, 4)})
 
 
-def felt_piano(name, hold, velocity=.7):
-    """Damped stiff-string modes, paired strings, felt hammer and key noise."""
-    f = hz(name)
-    length = max(3.2, hold + 2.25)
-    t = np.arange(round(length * SR), dtype=np.float64) / SR
-    result = np.zeros_like(t)
-    stiff = .000035 * (f / 220.) ** .45
-    detune = .00048
-    # Higher modes decay sooner; the fundamental and second mode bloom gently.
-    for mode in range(1, 11):
-        weight = np.array([1., .42, .215, .128, .070, .047, .030, .020, .013, .009])[mode - 1]
-        decay = (2.65 * (220. / f) ** .20) / mode ** .55
-        env = (1. - np.exp(-t / (.005 + .001 * mode))) * np.exp(-t / decay)
-        env *= np.exp(-np.maximum(t - hold, 0.) / (.55 + .35 / mode))
-        fm = f * mode * np.sqrt(1 + stiff * mode * mode)
-        phase = RNG.uniform(-.045, .045)
-        tone = .62 * np.cos(2 * np.pi * fm * t + phase)
-        tone += .38 * np.cos(2 * np.pi * fm * (1 + detune) * t - phase)
-        result += weight * env * tone
-    noise = RNG.standard_normal(len(t))
-    noise = signal.sosfilt(signal.butter(2, [350, 4200], btype="bandpass", fs=SR, output="sos"), noise)
-    result += noise * .10 * np.exp(-t / .017) * (1 - np.exp(-t / .0015))
-    # Gentle soundboard resonance below the main string modes.
-    result += .025 * np.sin(2 * np.pi * f * .5 * t) * np.exp(-t / .24) * (1 - np.exp(-t / .008))
-    result *= velocity ** 1.35
-    result *= np.minimum(1., np.maximum(0., (length - t) / .08))
-    return result.astype(np.float32)
-
-
-def pad(name, duration, phase):
-    """Soft, breathy, slowly detuned string-like pad; no percussion or subbass."""
-    release = 2.6
-    t = np.arange(round((duration + release) * SR), dtype=np.float64) / SR
-    f = hz(name)
-    out = np.zeros((len(t), 2), np.float64)
-    for side in (0, 1):
-        for partial, amp in [(1, 1.), (2, .26), (3, .115), (4, .045), (5, .017)]:
-            drift = .012 * np.sin(2 * np.pi * (.072 + partial * .007) * t + phase + side)
-            voice = np.sin(2 * np.pi * f * partial * (1 + (side * 2 - 1) * .00085) * t + phase + drift)
-            voice += .37 * np.sin(2 * np.pi * f * partial * (1 + (side * 2 - 1) * .0018) * t - phase)
-            out[:, side] += amp * voice
-    envelope = np.sin(np.minimum(t / 1.6, 1) * np.pi / 2) ** 2
-    envelope *= np.where(t <= duration, 1., np.cos(np.minimum((t - duration) / release, 1) * np.pi / 2) ** 2)
-    envelope *= .95 + .05 * np.sin(2 * np.pi * .12 * t + phase)
-    out *= envelope[:, None]
-    return out.astype(np.float32)
-
-
-def star(name):
-    f = hz(name)
-    t = np.arange(round(5.2 * SR), dtype=np.float64) / SR
-    out = np.zeros_like(t)
-    # Sparse glass/celesta modes, with the strongest modes in consonant octaves.
-    for ratio, amp, decay in [(1, 1., 1.7), (2, .32, .85), (3, .065, .44), (4.008, .055, .36)]:
-        out += amp * np.sin(2 * np.pi * f * ratio * t) * np.exp(-t / decay)
-    out *= (1 - np.exp(-t / .012))
-    out *= np.minimum(1, (5.2 - t) / .1)
-    return out.astype(np.float32)
-
-
-def reverb(bus, decay, wet, seed, predelay=.045):
-    """Stereo late diffusion plus non-rhythmic early room reflections."""
+def room(bus, rt60, wet, seed):
     rng = np.random.default_rng(seed)
-    seconds = decay * 1.7
-    t = np.arange(round(seconds * SR)) / SR
+    t = np.arange(round((rt60 + .3) * SR), dtype=np.float32) / SR
     result = np.zeros_like(bus)
-    mono = (bus[:, 0] + bus[:, 1]) * .7071
-    for side in (0, 1):
-        ir = rng.standard_normal(len(t))
-        ir = signal.sosfilt(signal.butter(2, 3500, fs=SR, output="sos"), ir)
-        ir = signal.sosfilt(signal.butter(1, 170, btype="highpass", fs=SR, output="sos"), ir)
-        onset = np.minimum(np.maximum((t - predelay) / .12, 0), 1)
-        ir *= np.exp(-t * 3.5 / decay) * onset
+    for side in range(2):
+        ir = rng.standard_normal(len(t)).astype(np.float32)
+        ir = signal.sosfilt(signal.butter(2, [190, 4100], 'bandpass', fs=SR, output='sos'), ir).astype(np.float32)
+        ir *= np.exp(-6.908 * t / rt60) * np.clip((t - .035) / .04, 0, 1)
         ir /= max(np.sqrt(np.sum(ir * ir)), 1e-8)
-        late = signal.fftconvolve(mono, ir, mode="full")[:N]
-        result[:, side] = late * wet
-        for time, amp in [(.067, .17), (.109, .115), (.173, .085), (.227, .055)]:
-            delay = round((time + side * .013) * SR)
-            result[delay:, side] += bus[:-delay, 1 - side] * amp
+        source = bus[:, side] * .75 + bus[:, 1 - side] * .25
+        result[:, side] = signal.fftconvolve(source, ir)[:N] * wet
+        for delay, amount in [(.029, .12), (.057, .08), (.089, .055)]:
+            d = round((delay + side * .006) * SR)
+            result[d:, side] += bus[:-d, 1 - side] * amount * wet
     return result
 
 
-# Every bar is intentionally voiced and every melody note is composed here.
-# Chord entries: bass, four pad voices, four arpeggio notes.
-CHORDS = {
-    "D": ("D3", ["F#3", "A3", "C#4", "E4"], ["A3", "D4", "F#4", "A4"]),
-    "Ac": ("C#3", ["E3", "A3", "B3", "E4"], ["A3", "C#4", "E4", "B4"]),
-    "Bm": ("B2", ["F#3", "A3", "C#4", "D4"], ["F#3", "B3", "D4", "F#4"]),
-    "G": ("G2", ["F#3", "A3", "B3", "D4"], ["G3", "B3", "D4", "A4"]),
-    "Em": ("E3", ["G3", "B3", "D4", "F#4"], ["G3", "B3", "D4", "F#4"]),
-    "Df": ("F#3", ["A3", "D4", "E4", "F#4"], ["A3", "D4", "F#4", "A4"]),
-    "As": ("A2", ["G3", "B3", "D4", "E4"], ["A3", "D4", "E4", "G4"]),
-    "A": ("A2", ["G3", "A3", "C#4", "E4"], ["A3", "C#4", "E4", "G4"]),
-    "Fm": ("F#3", ["A3", "C#4", "E4", "G#4"], ["A3", "C#4", "E4", "A4"]),
-    "Da": ("A2", ["F#3", "A3", "D4", "E4"], ["A3", "D4", "E4", "F#4"]),
-    "D6": ("D3", ["F#3", "A3", "B3", "E4"], ["A3", "D4", "F#4", "B4"]),
-}
-PROGRESSION = [
-    "D", "Ac", "Bm", "G", "Em", "Df", "G", "A",
-    "D", "Ac", "Bm", "G", "Em", "Df", "G", "As",
-    "Bm", "Fm", "G", "Da", "Em", "Bm", "G", "A",
-    "D", "Ac", "Bm", "G", "Em", "Df", "As", "D6",
-]
-
-# (beat offset, pitch, written length in beats)
-MELODY = [
-    [(0, "F#4", 1), (1, "A4", .5), (1.5, "B4", .5), (2, "A4", 1), (3, "F#4", .75)],
-    [(0, "E4", 1.5), (1.5, "F#4", .5), (2, "A4", 1), (3, "E4", .75)],
-    [(.25, "F#4", .75), (1, "B4", 1), (2, "D5", 1), (3, "C#5", .5), (3.5, "B4", .5)],
-    [(0, "A4", 1.5), (1.5, "F#4", .5), (2, "G4", 1.75)],
-    [(0, "G4", 1), (1, "B4", .5), (1.5, "A4", .5), (2, "F#4", 1), (3, "E4", .75)],
-    [(0, "F#4", 1.5), (1.5, "A4", .5), (2, "D5", 1.75)],
-    [(.5, "B4", 1), (1.5, "A4", .5), (2, "G4", 1), (3, "F#4", .75)],
-    [(0, "E4", 1.5), (1.5, "F#4", .5), (2, "E4", 1.75)],
-    [(0, "F#4", 1), (1, "A4", .5), (1.5, "B4", .5), (2, "A4", 1), (3, "D5", .75)],
-    [(0, "C#5", 1.5), (1.5, "B4", .5), (2, "A4", 1), (3, "E4", .75)],
-    [(0, "F#4", .75), (1, "B4", .75), (2, "D5", 1), (3, "E5", .75)],
-    [(0, "D5", 1.5), (1.5, "B4", .5), (2, "A4", 1.75)],
-    [(0, "G4", 1), (1, "B4", .5), (1.5, "D5", .5), (2, "B4", 1), (3, "A4", .75)],
-    [(0, "F#4", 1.5), (1.5, "A4", .5), (2, "E5", 1), (3, "D5", .75)],
-    [(0, "B4", 1), (1, "D5", .5), (1.5, "B4", .5), (2, "A4", 1), (3, "G4", .75)],
-    [(0, "A4", 1.5), (1.5, "G4", .5), (2, "E4", 1.75)],
-    [(0, "B4", 1.5), (1.5, "C#5", .5), (2, "D5", 1), (3, "F#5", .75)],
-    [(0, "E5", 1.5), (1.5, "C#5", .5), (2, "A4", 1.75)],
-    [(0, "B4", 1), (1, "D5", 1), (2, "G5", 1), (3, "F#5", .75)],
-    [(0, "E5", 1.5), (1.5, "D5", .5), (2, "A4", 1.75)],
-    [(0, "B4", 1), (1, "G4", .5), (1.5, "A4", .5), (2, "B4", 1), (3, "D5", .75)],
-    [(0, "C#5", 1.5), (1.5, "B4", .5), (2, "F#4", 1.75)],
-    [(0, "G4", 1), (1, "A4", .5), (1.5, "B4", .5), (2, "D5", 1), (3, "B4", .75)],
-    [(0, "A4", 1), (1, "G4", .5), (1.5, "F#4", .5), (2, "E4", 1.75)],
-    [(0, "F#4", 1), (1, "A4", .5), (1.5, "B4", .5), (2, "A4", 1), (3, "F#4", .75)],
-    [(0, "E4", 1.5), (1.5, "F#4", .5), (2, "A4", 1), (3, "E4", .75)],
-    [(0, "F#4", 1), (1, "B4", 1), (2, "D5", 1), (3, "C#5", .5), (3.5, "B4", .5)],
-    [(0, "A4", 1.5), (1.5, "F#4", .5), (2, "G4", 1.75)],
-    [(0, "G4", 1), (1, "B4", .5), (1.5, "A4", .5), (2, "F#4", 1), (3, "E4", .75)],
-    [(0, "F#4", 1.5), (1.5, "A4", .5), (2, "D5", 1), (3, "A4", .75)],
-    [(0, "G4", 1), (1, "F#4", 1), (2, "E4", 1.75)],
-    [(0, "F#4", 1), (1, "E4", 1), (2, "D4", 3.2)],
-]
-
-
-def run():
-    print(f"Rendering {DURATION:.2f} s at {SR} Hz: original 32-bar score", flush=True)
+def render():
+    OUT.mkdir(parents=True, exist_ok=True)
+    print(f'Rendering {TITLE}: 64 bars, {DURATION:.2f} seconds', flush=True)
     piano = np.zeros((N, 2), np.float32)
-    pads = np.zeros((N, 2), np.float32)
-    stars = np.zeros((N, 2), np.float32)
-    for bar, chord_name in enumerate(PROGRESSION):
-        when = LEAD + bar * BAR
-        bass, voices, arp = CHORDS[chord_name]
-        # A gentle swell toward the contrasting third section, then a quiet return.
-        section_gain = [1., 1.07, 1.12, .91][bar // 8]
-        if bar >= 29:
-            section_gain *= [1., .89, .82][bar - 29]
-        insert(pads, pad(bass, BAR + .05, bar * .47), when, .013 * section_gain)
-        for j, voice in enumerate(voices):
-            insert(pads, pad(voice, BAR + .07, j * 1.6 + bar * .32), when + j * .018, .014 * section_gain)
-        # Left hand: a low, soft octave-free root followed by a lilting broken voicing.
-        insert(piano, felt_piano(bass, 2.6 * BEAT, .60), when, .105 * section_gain, -.31)
-        accompaniment = [(0.5, 0), (1.5, 1), (2.5, 2), (3.5, 1)]
-        if bar in [3, 7, 11, 15, 19, 23, 27, 30]:
-            accompaniment = [(0.5, 0), (1.5, 1), (2.5, 2)]
-        if bar == 31:
-            accompaniment = [(.12, 0), (.22, 1), (.32, 2)]
-        for beat, j in accompaniment:
-            micro = RNG.uniform(-.009, .009)
-            insert(piano, felt_piano(arp[j], (1.5 if bar != 31 else 4.1) * BEAT, .47 + RNG.uniform(-.04, .04)),
-                   when + beat * BEAT + micro, .093 * section_gain, -.22 + j * .13)
-        for ni, (beat, note, length) in enumerate(MELODY[bar]):
-            # Small timing and dynamic inflections retain the intentional sung rhythm.
-            micro = RNG.uniform(-.011, .017)
-            velocity = .75 + RNG.uniform(-.025, .025)
-            if ni == 0:
-                velocity += .03
-            if bar // 8 == 2:
-                velocity += .025
-            if bar >= 30:
-                velocity -= .055
-            insert(piano, felt_piano(note, length * BEAT + .28, velocity),
-                   when + beat * BEAT + .024 + micro, .192 * section_gain, .11)
-        if bar % 8 == 7:
-            print(f"  scored bars 1–{bar + 1}", flush=True)
-    # Constellation highlights: only twelve individual bell notes in the whole piece.
-    for bar, beat, note, pan in [
-        (1, 2.5, "E6", .55), (4, 3, "B5", -.53), (7, 2, "A5", .37),
-        (9, 2.5, "E6", -.47), (12, 3, "F#6", .53), (15, 2, "A5", -.35),
-        (18, 2, "G6", .51), (20, 3, "B5", -.55), (23, 2, "E6", .32),
-        (25, 2.5, "E6", -.45), (28, 3, "B5", .50), (31, 2, "D6", -.23),
-    ]:
-        insert(stars, star(note), LEAD + bar * BAR + beat * BEAT, .031 if bar < 24 else .024, pan)
-    print("Rendering stereo space…", flush=True)
-    mix = piano + pads + stars
-    mix += reverb(piano, decay=3.1, wet=.205, seed=7)
-    mix += reverb(stars, decay=4.1, wet=.27, seed=11)
-    # Remove inaudible DC and soften the very highest frequencies.
-    mix = signal.sosfilt(signal.butter(2, 40, btype="highpass", fs=SR, output="sos"), mix, axis=0)
-    mix = signal.sosfilt(signal.butter(2, 12500, fs=SR, output="sos"), mix, axis=0)
-    fadein = round(2.0 * SR)
-    fadeout = round(4.4 * SR)
-    mix[:fadein] *= (np.sin(np.linspace(0, np.pi / 2, fadein)) ** 2)[:, None]
-    mix[-fadeout:] *= (np.cos(np.linspace(0, np.pi / 2, fadeout)) ** 2)[:, None]
-    mix *= 10 ** (-3.0 / 20) / np.max(np.abs(mix))
-    raw = HERE / "starsea-unnormalized.wav"
-    wavfile.write(raw, SR, (mix * 32767).astype(np.int16))
-    # Two-pass integrated loudness normalization preserves the performance dynamics.
-    first = subprocess.run([
-        "ffmpeg", "-hide_banner", "-i", str(raw), "-af",
-        "loudnorm=I=-19:TP=-2:LRA=10:print_format=json", "-f", "null", "-"
-    ], capture_output=True, text=True, check=True)
-    norm = json.loads(first.stderr[first.stderr.rfind("{"):])
-    af = ("loudnorm=I=-19:TP=-2:LRA=10:linear=true:"
-          f"measured_I={norm['input_i']}:measured_TP={norm['input_tp']}:"
-          f"measured_LRA={norm['input_lra']}:measured_thresh={norm['input_thresh']}:"
-          f"offset={norm['target_offset']}")
-    master = HERE / "starsea-awake-master.wav"
-    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(raw),
-                    "-af", af, "-ar", str(SR), "-c:a", "pcm_s16le", str(master)], check=True)
-    mp3 = HERE / "starsea-awake.mp3"
-    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(master),
-                    "-c:a", "libmp3lame", "-b:a", "96k", "-ar", str(SR),
-                    "-metadata", "title=星海未眠", "-metadata", "artist=Original composition",
-                    "-metadata", "comment=Original synthesized instrumental; 68 BPM; D major; 32 bars",
+    strings = np.zeros_like(piano)
+    harp = np.zeros_like(piano)
+    sections = [(0, 'Prelude'), (4, 'Theme'), (20, 'Still water'), (28, 'Starlight'), (44, 'Return'), (60, 'Coda')]
+    for bar, chord in enumerate(PROGRESSION):
+        start = STARTS[bar]
+        length = BAR_LENGTHS[bar]
+        eighth = length / 6
+        bass, arp, voices = CHORDS[chord]
+        energy = .73 if bar < 4 else .86 if bar < 20 else .71 if bar < 28 else 1.04 if bar < 44 else .84 if bar < 60 else .63
+        energy *= 1 + .025 * math.sin(bar * .83)
+        # Half-pedal clears the bass at the next harmony; accompaniment breathes.
+        place(piano, 'piano', bass, start, length * .88, .60, .63 * energy, -.16)
+        pattern = [(1, 0), (2, 1), (3, 2), (4, 1), (5, 0)]
+        if bar % 8 == 3:
+            pattern = [(1, 0), (2, 1), (3, 2), (4, 3)]
+        if 20 <= bar < 28:
+            pattern = [(1, 0), (2, 1), (4, 2)]
+        if bar in [11, 19, 27, 43, 59]:
+            pattern = [(1, 0), (2, 1), (3, 2)]
+        if bar >= 62:
+            pattern = [(.17, 0), (.35, 1), (.54, 2), (.76, 3)] if bar == 63 else [(1, 0), (2, 1), (3, 2)]
+        for beat, j in pattern:
+            hold = max(.42, length - beat * eighth + .12)
+            if bar == 63:
+                hold = 5.8
+            place(piano, 'piano', arp[j], start + beat * eighth + RNG.uniform(-.012, .012),
+                  hold, .52 + RNG.uniform(-.035, .035), .40 * energy, -.11 + .055 * j)
+        for j, (beat, note, duration) in enumerate(MELODY[bar]):
+            vel = (.72 if 28 <= bar < 44 else .65) + RNG.uniform(-.025, .025)
+            if j == 0:
+                vel += .025
+            if bar < 4 or bar >= 60:
+                vel -= .10
+            place(piano, 'piano', note, start + beat * eighth + .018 + RNG.uniform(-.01, .015),
+                  duration * eighth + .16, vel, 1.17 * energy, .075)
+        # Strings join after the theme has spoken; they withdraw for the ending.
+        if 12 <= bar < 62:
+            level = .067 if bar < 20 else .042 if bar < 28 else .10 if bar < 44 else .05
+            for j, note in enumerate(voices):
+                place(strings, 'viola', note, start + j * .035, length - .02, .64,
+                      level * energy, [-.32, .12, .35][j])
+            if 28 <= bar < 44:
+                place(strings, 'cello', midi(bass) + 12, start + .04, length, .63, .074, -.22)
+        # Single, quiet harp responses at phrase endings; no continuous glitter.
+        if bar in [2, 6, 10, 14, 18, 22, 26, 30, 34, 38, 42, 46, 50, 54, 58, 62]:
+            note = midi(arp[2]) + 12
+            place(harp, 'harp', note, start + 4.0 * eighth, 2.9, .62, .20 * energy, .33)
+            if bar in [18, 30, 38, 54]:
+                place(harp, 'harp', midi(arp[3]) + 12, start + 5 * eighth, 2.7, .55, .16 * energy, -.29)
+        if (bar + 1) % 8 == 0:
+            print(f'  Rendered {bar + 1}/64 bars', flush=True)
+    print('Mixing acoustic space and mastering', flush=True)
+    mix = piano + strings + harp
+    mix += room(piano, 2.7, .19, 11)
+    mix += room(strings, 3.5, .24, 19)
+    mix += room(harp, 3.8, .23, 31)
+    mix = signal.sosfilt(signal.butter(2, 38, 'highpass', fs=SR, output='sos'), mix, axis=0).astype(np.float32)
+    fadein, fadeout = round(.6 * SR), round(3.8 * SR)
+    mix[:fadein] *= np.sin(np.linspace(0, np.pi / 2, fadein, dtype=np.float32))[:, None] ** 2
+    mix[-fadeout:] *= np.cos(np.linspace(0, np.pi / 2, fadeout, dtype=np.float32))[:, None] ** 2
+    mix *= .70 / np.max(np.abs(mix))
+    raw = OUT / (STEM + '-premaster.wav')
+    wavfile.write(raw, SR, mix)
+    measure = subprocess.run(['ffmpeg', '-hide_banner', '-i', str(raw), '-af',
+        'loudnorm=I=-19:TP=-2:LRA=11:print_format=json', '-f', 'null', '-'], capture_output=True, text=True, check=True)
+    metrics = json.loads(measure.stderr[measure.stderr.rfind('{'):])
+    normalizer = ('loudnorm=I=-19:TP=-2:LRA=11:linear=true:'
+        f"measured_I={metrics['input_i']}:measured_TP={metrics['input_tp']}:"
+        f"measured_LRA={metrics['input_lra']}:measured_thresh={metrics['input_thresh']}:"
+        f"offset={metrics['target_offset']}")
+    master = OUT / (STEM + '-master.wav')
+    subprocess.run(['ffmpeg', '-y', '-v', 'error', '-i', str(raw), '-af', normalizer,
+                    '-ar', str(SR), '-c:a', 'pcm_s24le', str(master)], check=True)
+    mp3 = OUT / (STEM + '.mp3')
+    subprocess.run(['ffmpeg', '-y', '-v', 'error', '-i', str(master), '-c:a', 'libmp3lame',
+                    '-b:a', '160k', '-ar', str(SR), '-metadata', 'title=' + TITLE,
+                    '-metadata', 'artist=Starsea Original Soundtrack',
+                    '-metadata', 'album=星海之间', '-metadata',
+                    'comment=Original score. Piano: Salamander Grand Piano by Alexander Holm, CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/); sampled, retuned, sequenced and mixed. Strings and harp: VSCO 2 CE, CC0. Full credits: audio/CREDITS.txt',
                     str(mp3)], check=True)
-    excerpt = HERE / "starsea-awake-excerpt.wav"
-    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-ss", "28.4", "-i", str(master),
-                    "-t", "15", "-af", "afade=t=in:d=0.5,afade=t=out:st=13.8:d=1.2",
-                    "-c:a", "pcm_s16le", str(excerpt)], check=True)
-    subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(excerpt),
-                    "-c:a", "libmp3lame", "-b:a", "96k", str(HERE / "starsea-awake-excerpt.mp3")], check=True)
-    # Analyze the actual delivered MP3, so encoding overshoot is included.
-    check = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(mp3), "-af",
-                            "loudnorm=I=-19:TP=-2:LRA=10:print_format=json", "-f", "null", "-"],
-                           capture_output=True, text=True, check=True)
-    metrics = json.loads(check.stderr[check.stderr.rfind("{"):])
-    sample_rate, pcm = wavfile.read(master)
-    decoded = pcm.astype(np.float64) / 32768.
-    metrics_out = {
-        "title": "星海未眠",
-        "duration_seconds": len(pcm) / sample_rate,
-        "bpm": BPM,
-        "meter": "4/4",
-        "key": "D major",
-        "bars": 32,
-        "sections": ["A: bars 1–8", "A variation: bars 9–16", "B: bars 17–24", "Return: bars 25–32"],
-        "mp3_bytes": mp3.stat().st_size,
-        "mp3_bitrate_kbps": 96,
-        "mp3_integrated_lufs": float(metrics["input_i"]),
-        "mp3_true_peak_dbtp": float(metrics["input_tp"]),
-        "mp3_loudness_range_lu": float(metrics["input_lra"]),
-        "master_sample_peak_dbfs": float(20 * np.log10(np.max(np.abs(decoded)))),
-        "master_rms_dbfs": float(20 * np.log10(np.sqrt(np.mean(decoded ** 2)))),
-        "master_clipped_samples": int(np.sum(np.abs(pcm.astype(np.int32)) >= 32767)),
-        "stereo_correlation": float(np.corrcoef(decoded.T)[0, 1]),
-        "master_first_sample": decoded[0].tolist(),
-        "master_last_sample": decoded[-1].tolist(),
-    }
-    (HERE / "audio-checks.json").write_text(json.dumps(metrics_out, indent=2, ensure_ascii=False) + "\n")
+    result = subprocess.run(['ffmpeg', '-hide_banner', '-i', str(mp3), '-af',
+        'loudnorm=I=-19:TP=-2:LRA=11:print_format=json', '-f', 'null', '-'], capture_output=True, text=True, check=True)
+    loudness = json.loads(result.stderr[result.stderr.rfind('{'):])
+    sections_out = [{'name': name, 'bar': bar + 1, 'seconds': round(float(STARTS[bar]), 2)} for bar, name in sections]
+    report = {'title': TITLE, 'duration_seconds': round(DURATION, 3), 'meter': '6/8',
+              'key': 'E-flat major', 'bars': 64, 'tempo_unit': 'dotted quarter',
+              'nominal_tempo_bpm': 52, 'mp3_bytes': mp3.stat().st_size, 'bitrate_kbps': 160,
+              'mp3_integrated_lufs': float(loudness['input_i']),
+              'mp3_true_peak_dbtp': float(loudness['input_tp']),
+              'mp3_loudness_range_lu': float(loudness['input_lra']), 'sections': sections_out,
+              'note_events': len(EVENTS), 'sample_sources': ['Salamander Grand Piano', 'VSCO 2 Community Edition']}
+    (OUT / 'audio-checks.json').write_text(json.dumps(report, indent=2, ensure_ascii=False) + '\n')
+    (OUT / 'score-events.json').write_text(json.dumps(EVENTS, indent=2) + '\n')
+    # Short local previews do not become additional website payloads.
+    for name, offset in [('theme', STARTS[4]), ('starlight', STARTS[28])]:
+        subprocess.run(['ffmpeg', '-y', '-v', 'error', '-ss', str(offset), '-i', str(master),
+                        '-t', '22', '-af', 'afade=t=in:d=0.2,afade=t=out:st=20:d=2',
+                        '-c:a', 'libmp3lame', '-b:a', '160k', str(OUT / (STEM + '-' + name + '.mp3'))], check=True)
     raw.unlink()
-    print(json.dumps(metrics_out, indent=2, ensure_ascii=False), flush=True)
+    print(json.dumps(report, indent=2, ensure_ascii=False), flush=True)
 
 
-if __name__ == "__main__":
-    run()
+if __name__ == '__main__':
+    render()

@@ -1,0 +1,51 @@
+{
+  "title": "星落成诗",
+  "duration_seconds": 158.648,
+  "meter": "6/8",
+  "key": "E-flat major",
+  "bars": 64,
+  "tempo_unit": "dotted quarter",
+  "nominal_tempo_bpm": 52,
+  "mp3_bytes": 3174779,
+  "bitrate_kbps": 160,
+  "mp3_integrated_lufs": -19.42,
+  "mp3_true_peak_dbtp": -2.93,
+  "mp3_loudness_range_lu": 9.4,
+  "sections": [
+    {
+      "name": "Prelude",
+      "bar": 1,
+      "seconds": 0.14
+    },
+    {
+      "name": "Theme",
+      "bar": 5,
+      "seconds": 10.14
+    },
+    {
+      "name": "Still water",
+      "bar": 21,
+      "seconds": 47.28
+    },
+    {
+      "name": "Starlight",
+      "bar": 29,
+      "seconds": 66.99
+    },
+    {
+      "name": "Return",
+      "bar": 45,
+      "seconds": 102.75
+    },
+    {
+      "name": "Coda",
+      "bar": 61,
+      "seconds": 140.62
+    }
+  ],
+  "note_events": 720,
+  "sample_sources": [
+    "Salamander Grand Piano",
+    "VSCO 2 Community Edition"
+  ]
+}

@@ -1,0 +1,29 @@
+《星落成诗》 / When Starlight Finds the Water
+为「星海之间 · Starsea」重新创作的器乐配乐，2026 年 9 月。
+
+原创旋律与编曲：Starsea / Codex
+6/8 拍，降 E 大调，64 小节，钢琴、弦乐与竖琴。
+音色来自以下独立乐器的单音录音，经过移调、包络、力度、声像、
+乐谱编排、均衡及混响处理，离线渲染为完整音乐；未使用现成歌曲。
+
+Piano / 钢琴
+Salamander Grand Piano V3 by Alexander Holm.
+Creative Commons Attribution 3.0 Unported (CC BY 3.0):
+https://creativecommons.org/licenses/by/3.0/
+Source: https://github.com/sfzinstruments/SalamanderGrandPiano
+Original collection: https://archive.org/details/SalamanderGrandPianoV3
+SFZ remapping: kinwie; retuned version: Markus Fiedler.
+This recording uses selected soft/medium velocity samples, retuned, pitched,
+sequenced and mixed for this original score. No endorsement is implied.
+
+Strings and harp / 弦乐与竖琴
+VS Chamber Orchestra 2: Community Edition.
+Recorded by Sam Gossner and Simon Dalzell.
+Sample cutting: Elan Hickler / Soundemote.
+CC0 1.0 Universal:
+https://creativecommons.org/publicdomain/zero/1.0/
+Source: https://github.com/sgossner/VSCO-2-CE
+
+Source score and exact sample references:
+https://github.com/starshadows/starsea/tree/main/music
+https://github.com/starshadows/starsea/blob/main/tools/compose_soundtrack.py
