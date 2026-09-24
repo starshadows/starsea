@@ -1,4 +1,4 @@
-import { createNebulaCache } from './nebula-cache.js';
+import { createNebulaCache } from './nebula-cache.js?v=2';
 
 const vertexSource = `#version 300 es
 precision highp float;
@@ -72,16 +72,29 @@ float noise3(vec3 p){
 const mat3 turn=mat3(.00,.80,.60,-.80,.36,-.48,-.60,-.48,.64);
 float fbm(vec3 p){
   float v=0.0,a=.53;
+#ifdef LITE_NEBULA
+  for(int i=0;i<3;i++){v+=a*noise3(p);p=turn*p*2.03+vec3(2.1,6.7,3.4);a*=.49;}
+  return v*1.10;
+#else
   for(int i=0;i<5;i++){v+=a*noise3(p);p=turn*p*2.03+vec3(2.1,6.7,3.4);a*=.49;}
   return v;
+#endif
 }
 float detailNoise(vec3 p){
   float v=0.0,a=.55;
+#ifdef LITE_NEBULA
+  for(int i=0;i<2;i++){v+=a*noise3(p);p=turn*p*2.08+3.7;a*=.48;}
+  return v*1.15;
+#else
   for(int i=0;i<3;i++){v+=a*noise3(p);p=turn*p*2.08+3.7;a*=.48;}
   return v;
+#endif
 }
 
 float magnifiedDetail(vec3 p,float domainScale){
+#ifdef LITE_NEBULA
+  return 0.0;
+#else
   // Fixed world-space frequencies become visible gradually as the view closes in.
   // Zero-mean residuals preserve the overall color and shape of the nebula.
   float budget=uProjection.z;
@@ -99,6 +112,7 @@ float magnifiedDetail(vec3 p,float domainScale){
     footprint*=2.03;amplitude*=.52;
   }
   return residual;
+#endif
 }
 
 vec3 starLayer(vec3 d,float scale,float threshold){
@@ -273,7 +287,7 @@ vec4 cachedNebula(vec3 d){
 
 vec3 sky(vec3 d,bool reflected){
   float y=max(d.y,0.0);
-#ifdef FULL_NEBULA
+#ifdef LITE_NEBULA
   vec4 field=nebula(d);
 #else
   vec4 field=cachedNebula(d);
@@ -334,10 +348,15 @@ void wave(in vec2 p,in float t,in bool heightOnly,out float height,out vec2 deri
 vec3 lake(vec3 eye,vec3 ray){
   float t=-eye.y/ray.y;
   vec3 pos=eye+ray*t;
-  float height;vec2 slope;
-  wave(pos.xz,t,true,height,slope);
-  t=(height-eye.y)/ray.y;
-  pos=eye+ray*t;
+  float height=0.0;vec2 slope=vec2(0);
+  // Correct the intersection where displaced waves are visible, then fade the
+  // correction out before the distant water. Most pixels skip this wave pass.
+  if(t<120.0){
+    wave(pos.xz,t,true,height,slope);
+    float correction=1.0-smoothstep(60.0,120.0,t);
+    t=(height*correction-eye.y)/ray.y;
+    pos=eye+ray*t;
+  }
   // The final horizon blend is exactly one from this distance onward.
   if(t>=1800.0)return sky(normalize(vec3(ray.x,.002,ray.z)),true);
   wave(pos.xz,t,false,height,slope);
@@ -345,6 +364,10 @@ vec3 lake(vec3 eye,vec3 ray){
   vec3 reflection=reflect(ray,normal);
   reflection.y=max(reflection.y,.003);
   reflection=normalize(reflection);
+  // Bend the far reflection toward the shared horizon before sampling sky.
+  // At 1800 it matches the early-return horizon direction exactly.
+  float horizonBlend=smoothstep(400.0,1800.0,t);
+  if(t>400.0)reflection=normalize(mix(reflection,normalize(vec3(ray.x,.002,ray.z)),horizonBlend));
   vec3 reflected=sky(reflection,true);
   float fresnel=.53+.47*pow(1.0-max(0.0,dot(-ray,normal)),3.0);
   vec3 water=vec3(.011,.022,.058);
@@ -378,11 +401,8 @@ vec3 lake(vec3 eye,vec3 ray){
   }
   float mist=1.0-exp(-t*.0045);
   col=mix(col,vec3(.20,.22,.39),mist*.24);
-  // A shared distant color prevents a hard stripe when the horizon rotates.
-  if(t>400.0){
-    vec3 horizonColor=sky(normalize(vec3(ray.x,.002,ray.z)),true);
-    col=mix(col,horizonColor,smoothstep(400.0,1800.0,t));
-  }
+  // Fade the water treatment, including mist, into the same horizon sample.
+  col=mix(col,reflected,horizonBlend);
   return col;
 }
 
@@ -490,13 +510,18 @@ function initialize() {
     return p;
   }
   const nebulaCache=createNebulaCache(gl,vertexSource,fragmentSource,program);
-  const sceneProgram = program(vertexSource,nebulaCache?fragmentSource:fragmentSource.replace('#version 300 es','#version 300 es\n#define FULL_NEBULA'));
+  const sceneProgram = program(vertexSource,nebulaCache?fragmentSource:fragmentSource.replace('#version 300 es','#version 300 es\n#define LITE_NEBULA'));
   const dustProgram = program(particleVertex, particleFragment);
   const uniformNames = ['uResolution','uTime','uYaw','uPitch','uFov','uEye','uRipples','uMeteorA','uMeteorB','uMeteorC','uMeteorD','uMeteorCount','uPixelScale','uPointSizeMax','uProjection','uCamera','uCloudRotation','uWaveShape','uWaveMotion','uNebulaCube','uNebulaPatch','uCacheEncoded','uPatchAvailable','uPatchForward','uPatchRight','uPatchUp','uPatchScale'];
   function uniforms(p) { return Object.fromEntries(uniformNames.map(name=>[name,gl.getUniformLocation(p,name)])); }
   const sceneU = uniforms(sceneProgram), dustU = uniforms(dustProgram);
   canvas.dataset.renderer=nebulaCache?'cached-nebula':'procedural-fallback';
-  if(nebulaCache)canvas.dataset.nebulaSize=String(nebulaCache.size);
+  if(nebulaCache){
+    canvas.dataset.nebulaSize=String(nebulaCache.size);
+    canvas.dataset.nebulaPatchSize=String(nebulaCache.stats.patchSize);
+    canvas.dataset.nebulaFormat=nebulaCache.stats.format;
+    canvas.dataset.nebulaBytes=String(nebulaCache.stats.bytes);
+  }
   gl.useProgram(dustProgram);gl.uniform1f(dustU.uPointSizeMax,gl.getParameter(gl.ALIASED_POINT_SIZE_RANGE)[1]);
   const emptyVao = gl.createVertexArray();
   const dustVao = gl.createVertexArray();
@@ -536,7 +561,7 @@ function initialize() {
   const meteorC=new Float32Array(meteorCount*4),meteorD=new Float32Array(meteorCount*4);
   const meteors=Array(meteorCount).fill(null);
   let rippleIndex=0,nextMeteor=time+1.4,shower=[];
-  let quality='high',autoScale=1,frameTimes=[],lastAdapt=0,fastWindows=0;
+  let quality=document.querySelector('#quality').value,autoScale=1,frameTimes=[],lastAdapt=0,slowWindows=0,fastWindows=0;
   let immersive=false,pointer=null,dragDistance=0;
   const pointers=new Map();let pinch=null;
   let toastTimeout;
@@ -569,12 +594,12 @@ function initialize() {
     cssWidth=Math.max(1,bounds.width);cssHeight=Math.max(1,bounds.height);
     lastDpr=window.devicePixelRatio||1;
     // High uses native pixels; ultra may supersample lower-density screens.
-    // Only explicitly selected performance modes trade resolution for speed.
+    // Auto keeps a generous pixel budget until sustained slow frames require less.
     let ratio=lastDpr;
     if(quality==='ultra')ratio=Math.max(lastDpr,Math.min(3,lastDpr*1.25));
     if(quality==='auto'||quality==='low'){
       const budget=quality==='auto'?(coarse?2200000:4200000):(coarse?850000:1400000);
-      ratio=Math.min(ratio,quality==='low'?1:2,Math.sqrt(budget/(cssWidth*cssHeight)));
+      ratio=Math.min(ratio,quality==='low'?1:2.5,Math.sqrt(budget/(cssWidth*cssHeight)));
       if(quality==='auto')ratio*=autoScale;
     }
     ratio=Math.min(ratio,maxBufferWidth/cssWidth,maxBufferHeight/cssHeight);
@@ -583,6 +608,7 @@ function initialize() {
     if(canvas.width!==w||canvas.height!==h){
       canvas.width=w;canvas.height=h;
       gl.viewport(0,0,gl.drawingBufferWidth,gl.drawingBufferHeight);
+      if(quality==='auto'){frameTimes=[];slowWindows=0;fastWindows=0;lastAdapt=performance.now();}
     }
     requestFrame();
   }
@@ -718,12 +744,12 @@ function initialize() {
   zoomIn.addEventListener('click',()=>setZoom(zoomOf(targetFov)*Math.SQRT2));
   zoomOut.addEventListener('click',()=>setZoom(zoomOf(targetFov)/Math.SQRT2));
   zoomLabel.addEventListener('click',()=>setZoom(1));
-  document.querySelector('#quality').addEventListener('change',e=>{quality=e.target.value;autoScale=1;frameTimes=[];fastWindows=0;lastAdapt=performance.now();resize();});
+  document.querySelector('#quality').addEventListener('change',e=>{quality=e.target.value;autoScale=1;frameTimes=[];slowWindows=0;fastWindows=0;lastAdapt=performance.now();resize();});
   window.addEventListener('resize',resize);
   if(typeof ResizeObserver!=='undefined')new ResizeObserver(resize).observe(canvas);
   window.visualViewport?.addEventListener('resize',resize);
   observeDpr();
-  document.addEventListener('visibilitychange',()=>{previous=0;frameTimes=[];if(document.hidden){cancelAnimationFrame(raf);raf=0;keys.clear();}else requestFrame();});
+  document.addEventListener('visibilitychange',()=>{previous=0;frameTimes=[];slowWindows=0;fastWindows=0;lastAdapt=performance.now();if(document.hidden){cancelAnimationFrame(raf);raf=0;keys.clear();}else requestFrame();});
   reducedMotion.addEventListener('change',e=>{paused=e.matches;previous=0;updatePause();requestFrame();});
   canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();cancelAnimationFrame(raf);raf=0;showError('画面暂时中断。重新进入，就能再次回到星海。');});
 
@@ -737,7 +763,8 @@ function initialize() {
     raf=0;
     // Some display/browser zoom changes arrive without a window resize.
     if((window.devicePixelRatio||1)!==lastDpr){observeDpr();resize();}
-    const rawDt=previous?(now-previous)/1000:1/60;
+    const validFrame=previous!==0;
+    const rawDt=validFrame?(now-previous)/1000:1/60;
     const dt=Math.min(rawDt,.05);previous=now;
     // Keep sky and meteor speed tied to elapsed time even on slower GPUs.
     // Camera input keeps its small timestep; tab visibility resets the clock.
@@ -780,7 +807,8 @@ function initialize() {
       waveMotion[i*2]=time*(.35+i*.16)*(i%2*2-1);
       waveMotion[i*2+1]=i<6?1:weight*weight*(3-2*weight);
     }
-    if(nebulaCache)nebulaCache.update({yaw,pitch,fov,time,aspect:projection[3],zoomDetail,quality});
+    const moving=Math.abs(targetYaw-yaw)+Math.abs(targetPitch-pitch)+Math.abs(targetFov-fov)>.0001||pointer!==null||pinch!==null||keys.size>0;
+    if(nebulaCache)nebulaCache.update({yaw,pitch,fov,time,aspect:projection[3],zoomDetail,quality,now,moving});
     gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.viewport(0,0,gl.drawingBufferWidth,gl.drawingBufferHeight);
     gl.disable(gl.BLEND);gl.useProgram(sceneProgram);gl.bindVertexArray(emptyVao);setCommon(sceneU);
     if(nebulaCache)nebulaCache.bind(sceneU);
@@ -795,18 +823,25 @@ function initialize() {
     gl.uniform1f(dustU.uPixelScale,gl.drawingBufferHeight/cssHeight);
     gl.drawArrays(gl.POINTS,0,particleCount);gl.disable(gl.BLEND);
     if(!loading.classList.contains('finished')){loading.classList.add('finished');setTimeout(()=>loading.remove(),1400);}
-    if(!paused&&quality==='auto'&&now-lastAdapt>4500){
-      if(frameTimes.length>30){
+    if(paused){frameTimes=[];slowWindows=0;fastWindows=0;lastAdapt=now;}
+    if(!paused&&quality==='auto'&&now-lastAdapt>=2000){
+      if(frameTimes.length>=8){
         const sorted=frameTimes.slice().sort((a,b)=>a-b),median=sorted[Math.floor(sorted.length/2)];
-        if(median>.043&&autoScale>.78){autoScale=Math.max(.78,autoScale*.9);fastWindows=0;resize();}
-        else if(median<.021&&autoScale<1){if(++fastWindows>=2){autoScale=Math.min(1,autoScale/.9);fastWindows=0;resize();}}
-        else fastWindows=0;
+        if(median>.038){slowWindows++;fastWindows=0;}
+        else if(median<.019){fastWindows++;slowWindows=0;}
+        else {slowWindows=0;fastWindows=0;}
+        if(slowWindows>=2){
+          slowWindows=0;
+          if(autoScale>.70){autoScale=Math.max(.70,autoScale*.9);resize();}
+        }else if(fastWindows>=3){
+          fastWindows=0;
+          if(autoScale<1){autoScale=Math.min(1,autoScale/.9);resize();}
+        }
       }
       lastAdapt=now;frameTimes=[];
     }
-    if(!paused&&rawDt<.3)frameTimes.push(rawDt);
-    if(frameTimes.length>160)frameTimes.shift();
-    const moving=Math.abs(targetYaw-yaw)+Math.abs(targetPitch-pitch)+Math.abs(targetFov-fov)>.0001;
+    if(!paused&&validFrame&&rawDt<.6)frameTimes.push(rawDt);
+    if(frameTimes.length>500)frameTimes.shift();
     if(!paused||moving||keys.size)requestFrame();
   }
   startMeteor(true);meteors[0].started-=.18;
